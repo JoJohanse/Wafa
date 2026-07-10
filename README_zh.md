@@ -1,6 +1,6 @@
 # Wafa — AI Agent 数字钱包
 
-> 🌐 语言 / Language: **中文**(本文件) · [English](README.en.md)
+> 🌐 语言 / Language: **中文**(本文件) · [English](README.md)
 
 > Wallet for Agent: 一个可供 AI agent 自主使用的 EVM 加密货币钱包,以 Agent Skill 形式分发。
 
