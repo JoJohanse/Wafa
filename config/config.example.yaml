@@ -1,0 +1,74 @@
+# =============================================================================
+# Wafa 运行时配置模板
+# =============================================================================
+# 复制此文件到 ~/.wafa/config.yaml 后按需修改。
+# wafa init 命令会自动完成此复制。
+# =============================================================================
+
+# 当前使用的链(对应下方 chains 的 key)
+default_chain: base
+
+# ---------------------------------------------------------------------------
+# 支持的链: 每个 key 是链的别名, 包含 RPC 端点与元数据
+# RPC 可用公共端点(开发)或私有端点(Alchemy/Infura, 生产推荐)
+# ---------------------------------------------------------------------------
+chains:
+  ethereum:
+    chain_id: 1
+    rpc_url: "https://eth.llamarpc.com"
+    explorer: "https://etherscan.io"
+    native_symbol: "ETH"
+    native_decimals: 18
+
+  base:
+    chain_id: 8453
+    rpc_url: "https://mainnet.base.org"
+    explorer: "https://basescan.org"
+    native_symbol: "ETH"
+    native_decimals: 18
+
+  base-sepolia:
+    chain_id: 84532
+    rpc_url: "https://sepolia.base.org"
+    explorer: "https://sepolia.basescan.org"
+    native_symbol: "ETH"
+    native_decimals: 18
+
+  polygon:
+    chain_id: 137
+    rpc_url: "https://polygon-rpc.com"
+    explorer: "https://polygonscan.com"
+    native_symbol: "MATIC"
+    native_decimals: 18
+
+  sepolia:
+    chain_id: 11155111
+    rpc_url: "https://rpc.sepolia.org"
+    explorer: "https://sepolia.etherscan.io"
+    native_symbol: "ETH"
+    native_decimals: 18
+
+# ---------------------------------------------------------------------------
+# 常用 ERC-20 代币地址(按链), 便于 --token usdc 直接引用
+# ---------------------------------------------------------------------------
+tokens:
+  base:
+    usdc:
+      address: "0x833589fCD6eDb6E08f4c7C32D4f71b54bdA02913"
+      decimals: 6
+  ethereum:
+    usdc:
+      address: "0xA0b86991c6218b36c1d19D4a2e9Eb0cE3606eB48"
+      decimals: 6
+  base-sepolia:
+    # 测试网 USDC 可自行部署或使用水龙头; 此处留空
+    {}
+
+# ---------------------------------------------------------------------------
+# 交易参数默认值
+# ---------------------------------------------------------------------------
+tx_defaults:
+  # Gas 估算上浮系数, 防止 Gas 波动导致失败
+  gas_multiplier: 1.1
+  # 转账等待超时(秒)
+  receipt_timeout: 120

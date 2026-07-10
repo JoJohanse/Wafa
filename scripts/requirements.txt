@@ -1,0 +1,6 @@
+# Wafa - AI Agent 数字钱包 Skill 依赖
+# 安装: pip install -r scripts/requirements.txt
+
+eth-account>=0.13.0    # 密钥生成、V3 keystore 加密/解密、交易签名
+web3>=6.15.0           # 链交互: 余额查询、Gas 估算、广播交易、ERC-20 调用
+PyYAML>=6.0            # 策略与配置解析
