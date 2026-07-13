@@ -5,3 +5,6 @@
 -r requirements.txt
 
 pytest>=7.0             # 测试框架
+eth-tester>=0.9.0       # 内存 EVM, 用于 send() 接口测试(无需外部 RPC)
+py-evm>=0.7.0           # eth-tester 的 EVM 后端
+py-solc-x>=2.0.0        # 测试中编译 MockERC20 合约

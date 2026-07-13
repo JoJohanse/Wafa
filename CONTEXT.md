@@ -20,7 +20,23 @@ The `chain` module connects, queries balances, estimates fees, and broadcasts
 signed transactions.
 
 **Transfer** — a send of native coin or ERC-20 token to a recipient address.
-Policy-checked before signing; audit-logged after broadcast.
+Policy-checked before signing; signed and broadcast through the `chain` module's
+`send()` interface; audit-logged after the on-chain result is known.
+
+**Token** — a value object (`Token(address, decimals)`) identifying an ERC-20
+for a transfer. Passed to `chain.send(token=...)`. Resolution from a reference
+(alias or address) to a `Token` is a separate concern (candidate #3); today the
+CLI resolves via `store.resolve_token` and constructs the `Token` before calling
+`send()`.
+
+**Receipt** — the on-chain result of a `send()`, returned by the `chain` module.
+A thin value object: `status` (`"success"` | `"pending"` | `"failed"`), `tx_hash`,
+`block_number`, `gas_used`, `explorer_url`. The `ok` property is true only for
+`success`. `send()` waits for the receipt (short timeout, default 30s); if the
+timeout expires it returns `status="pending"` — the transfer was broadcast but
+not confirmed, and the daily/rate counters are **not** updated. Broadcast-time
+failures (invalid address, signing error, RPC rejection) raise an exception
+rather than returning a Receipt — only post-broadcast results arrive as a Receipt.
 
 ## Policy engine
 
@@ -42,11 +58,11 @@ branches on `decision.allowed`; rejected transfers never unlock the wallet.
   last hour. Only successful sends are counted.
 
 **record_outcome** — the single public write method on the policy module.
-Called once after a successful transfer; updates daily cumulative spend and the
-rate-limit timestamp together. There is no public `record_spend` or
-`record_tx_timestamp` — a caller cannot update one counter without the other.
-Failed or rejected transfers do not call `record_outcome` (they don't count
-toward rate limits).
+Called once after a **confirmed successful** transfer (`Receipt.ok`); updates
+daily cumulative spend and the rate-limit timestamp together. There is no public
+`record_spend` or `record_tx_timestamp` — a caller cannot update one counter
+without the other. Failed, pending, or rejected transfers do not call
+`record_outcome` (they don't count toward rate limits).
 
 **check** — the pure-read decision entry point. Reads policy config and policy
 state, returns a `Decision`. Never writes state.
@@ -67,10 +83,8 @@ format; the content is supplied by callers.
 
 ## Not yet named / future
 
-- **Receipt** — the post-broadcast confirmation of a transfer's on-chain status.
-  Not yet a first-class concept (the current send path fires-and-forgets; see
-  candidate #1 in the architecture review). When deepened, the `chain` module
-  will return a `Receipt` and `record_outcome` will be called with its result.
 - **Token resolution** — resolving a `--token` reference (alias or address) to a
-  `{address, decimals, symbol}` triple. Currently split across `store` and
-  `chain` (candidate #3); a dedicated `token` module is the planned deepening.
+  `Token` value object. Currently lives in `store.resolve_token` (returns a dict;
+  hardcodes `decimals: 6` for unknown addresses — a known footgun). A dedicated
+  `token` module with on-chain `decimals()` resolution is candidate #3; the
+  `Token` dataclass already exists in `chain` and will move there.

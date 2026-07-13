@@ -173,43 +173,97 @@ def estimate_fee(w3: Web3, from_addr: str, to: str, data: str = "0x", value: int
 
 
 # ---------------------------------------------------------------------------
-# 转账
+# 转账 —— 统一的 send() 接口
 # ---------------------------------------------------------------------------
 
 @dataclass
-class SendResult:
+class Token:
+    """ERC-20 代币的链上标识, 供 send() 使用。
+
+    address:  合约地址(checksum 或小写均可, send 内部转换)
+    decimals: 精度(用于 human amount → 最小单位换算)
+    """
+    address: str
+    decimals: int
+
+
+@dataclass
+class Receipt:
+    """发送后的链上结果。status 是唯一需要分支判断的字段。
+
+    status:  "success" — 已上链且执行成功(receipt.status == 1)
+             "failed"  — 已上链但执行回退(receipt.status == 0)
+             "pending" — 已广播但在 receipt_timeout 内未确认
+    tx_hash:      交易哈希(0x...)
+    block_number: 上链区块号; pending 时为 None
+    gas_used:     实际消耗 gas; pending 时为 None
+    explorer_url: 区块浏览器链接(从 chain_config 派生)
+    """
+    status: str
     tx_hash: str
-    to: str
-    amount_human: float
-    symbol: str
-    is_token: bool
+    block_number: int | None = None
+    gas_used: int | None = None
     explorer_url: str | None = None
 
+    @property
+    def ok(self) -> bool:
+        """是否确认成功(仅 status == 'success')。"""
+        return self.status == "success"
 
-def _wait_for_receipt(w3: Web3, tx_hash: bytes, timeout: int = 120) -> dict:
-    """等待交易上链, 返回 receipt。"""
-    return w3.eth.wait_for_transaction_receipt(tx_hash, timeout=timeout)
 
-
-def send_native(
+def send(
     w3: Web3,
     chain_config: dict,
-    from_account: Any,           # eth_account.Account(含 .address 与 .key)
+    from_account: Any,            # eth_account.Account(含 .address 与 .key)
     to_address: str,
     amount_human: float,
+    token: Token | None = None,
     gas_multiplier: float = 1.1,
-) -> SendResult:
-    """发送原生币(ETH)。本地签名后广播原始交易, 私钥不上 RPC。"""
-    decimals = chain_config.get("native_decimals", 18)
-    value = int(round(amount_human * (10 ** decimals)))
+    receipt_timeout: int = 30,
+) -> Receipt:
+    """发送原生币或 ERC-20 代币。本地签名后广播, 等待 receipt, 返回链上结果。
+
+    吸收: 地址校验、精度换算、fee 估算、tx 构造、签名、广播、receipt 等待。
+    私钥不上 RPC —— 只在本地签名。
+
+    token=None 发送原生币; token=Token(...) 发送 ERC-20。
+
+    错误模型:
+      - 广播前失败(地址非法、签名失败、广播被拒)→ 抛异常
+      - 广播后链上结果 → 返回 Receipt(status):
+          success / failed(链上回退) / pending(超时未确认)
+    """
+    # 地址校验(seam 上校验, 任何调用方都受保护)
+    if not Web3.is_address(to_address):
+        raise ValueError(f"非法收款地址: {to_address}")
+
     from_ck = Web3.to_checksum_address(from_account.address)
     to_ck = Web3.to_checksum_address(to_address)
 
+    # 构造 tx dict —— 原生与 token 路径不同, 但后半段(签名+广播+receipt)统一
+    if token is None:
+        tx = _build_native_tx(w3, chain_config, from_ck, to_ck, amount_human, gas_multiplier)
+    else:
+        tx = _build_token_tx(w3, chain_config, from_ck, to_ck, amount_human, token, gas_multiplier)
+
+    return _sign_broadcast_await(w3, tx, from_account, chain_config, receipt_timeout)
+
+
+def _build_native_tx(
+    w3: Web3,
+    chain_config: dict,
+    from_ck: str,
+    to_ck: str,
+    amount_human: float,
+    gas_multiplier: float,
+) -> dict:
+    """构造 EIP-1559 原生币交易 dict。"""
+    decimals = chain_config.get("native_decimals", 18)
+    value = int(round(amount_human * (10 ** decimals)))
     fee = estimate_fee(w3, from_ck, to_ck, value=value)
     gas_limit = int(fee.gas_limit * gas_multiplier)
-
     nonce = w3.eth.get_transaction_count(from_ck)
-    tx = {
+    return {
         "type": 2,  # EIP-1559
         "chainId": chain_config["chain_id"],
         "from": from_ck,
@@ -220,83 +274,71 @@ def send_native(
         "maxFeePerGas": fee.max_fee_per_gas,
         "maxPriorityFeePerGas": fee.max_priority_fee_per_gas,
     }
+
+
+def _build_token_tx(
+    w3: Web3,
+    chain_config: dict,
+    from_ck: str,
+    to_ck: str,
+    amount_human: float,
+    token: Token,
+    gas_multiplier: float,
+) -> dict:
+    """构造 ERC-20 transfer 交易 dict。
+
+    用 contract.functions.transfer(...).build_transaction 获取 calldata + 默认字段,
+    再显式补 nonce(不同 provider 对 build_transaction 的 nonce 自动填充行为不一致),
+    最后做 gas 上浮。
+    """
+    value = int(round(amount_human * (10 ** token.decimals)))
+    token_ck = Web3.to_checksum_address(token.address)
+    contract = w3.eth.contract(address=token_ck, abi=_ERC20_ABI)
+    tx = contract.functions.transfer(to_ck, value).build_transaction({"from": from_ck})
+    # build_transaction 不保证填充 nonce —— 显式补上
+    if "nonce" not in tx:
+        tx["nonce"] = w3.eth.get_transaction_count(from_ck)
+    tx["gas"] = int(tx["gas"] * gas_multiplier)
+    return tx
+
+
+def _sign_broadcast_await(
+    w3: Web3,
+    tx: dict,
+    from_account: Any,
+    chain_config: dict,
+    receipt_timeout: int,
+) -> Receipt:
+    """签名 + 广播 + 等待 receipt。send() 的共享后半段。
+
+    广播前失败(签名/广播)→ 抛异常。
+    广播后: receipt.status==1 → success; ==0 → failed; 超时 → pending。
+    """
     signed = w3.eth.account.sign_transaction(tx, from_account.key)
     tx_hash_bytes = w3.eth.send_raw_transaction(signed.raw_transaction)
     tx_hash = tx_hash_bytes.hex()
     if not tx_hash.startswith("0x"):
         tx_hash = "0x" + tx_hash
+    explorer_url = f"{chain_config.get('explorer', '')}/tx/{tx_hash}".strip() or None
 
-    return SendResult(
-        tx_hash=tx_hash,
-        to=to_address,
-        amount_human=amount_human,
-        symbol=chain_config.get("native_symbol", "ETH"),
-        is_token=False,
-        explorer_url=f"{chain_config.get('explorer', '')}/tx/{tx_hash}".strip(),
-    )
-
-
-def send_token(
-    w3: Web3,
-    chain_config: dict,
-    from_account: Any,
-    token_address: str,
-    token_decimals: int,
-    to_address: str,
-    amount_human: float,
-    gas_multiplier: float = 1.1,
-) -> SendResult:
-    """发送 ERC-20 代币。构造 transfer() 调用数据后签名广播。"""
-    value = int(round(amount_human * (10 ** token_decimals)))
-    from_ck = Web3.to_checksum_address(from_account.address)
-    to_ck = Web3.to_checksum_address(to_address)
-    token_ck = Web3.to_checksum_address(token_address)
-
-    contract = w3.eth.contract(address=token_ck, abi=_ERC20_ABI)
-    transfer_data = contract.functions.transfer(to_ck, value).build_transaction(
-        {"from": from_ck}
-    )
-    # build_transaction 已含 chainId/gas/nonce/费用, 这里只做 gas 上浮
-    transfer_data["gas"] = int(transfer_data["gas"] * gas_multiplier)
-
-    signed = w3.eth.account.sign_transaction(transfer_data, from_account.key)
-    tx_hash_bytes = w3.eth.send_raw_transaction(signed.raw_transaction)
-    tx_hash = tx_hash_bytes.hex()
-    if not tx_hash.startswith("0x"):
-        tx_hash = "0x" + tx_hash
-
-    # 读取代币 symbol 作为显示
     try:
-        symbol = contract.functions.symbol().call()
-    except Exception:
-        symbol = "TOKEN"
+        receipt = w3.eth.wait_for_transaction_receipt(tx_hash_bytes, timeout=receipt_timeout)
+    except TimeExhausted:
+        return Receipt(
+            status="pending",
+            tx_hash=tx_hash,
+            explorer_url=explorer_url,
+        )
 
-    return SendResult(
+    if receipt.status == 1:
+        status = "success"
+    else:
+        status = "failed"
+
+    return Receipt(
+        status=status,
         tx_hash=tx_hash,
-        to=to_address,
-        amount_human=amount_human,
-        symbol=symbol,
-        is_token=True,
-        explorer_url=f"{chain_config.get('explorer', '')}/tx/{tx_hash}".strip(),
+        block_number=receipt.blockNumber,
+        gas_used=receipt.gasUsed,
+        explorer_url=explorer_url,
     )
-
-
-# ---------------------------------------------------------------------------
-# 地址校验
-# ---------------------------------------------------------------------------
-
-def is_valid_address(addr: str) -> bool:
-    """检查是否为合法 EVM 地址(0x + 40 hex)。"""
-    if not isinstance(addr, str):
-        return False
-    addr = addr.strip()
-    if not (addr.startswith("0x") or addr.startswith("0X")):
-        return False
-    hex_part = addr[2:]
-    if len(hex_part) != 40:
-        return False
-    try:
-        int(hex_part, 16)
-        return True
-    except ValueError:
-        return False

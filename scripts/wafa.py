@@ -201,10 +201,7 @@ def cmd_balance(args: argparse.Namespace) -> int:
 def cmd_send(args: argparse.Namespace) -> int:
     section("发起转账")
 
-    # 1. 基本校验
-    if not chain_mod.is_valid_address(args.to):
-        err(f"非法收款地址: {args.to}")
-        return 1
+    # 1. 基本校验(地址校验在 send() 内部做, 这里只校验金额)
     try:
         amount = float(args.amount)
         if amount <= 0:
@@ -220,15 +217,19 @@ def cmd_send(args: argparse.Namespace) -> int:
         err(str(e))
         return 1
 
-    # 3. 判定是原生币还是代币, 确定 kind
+    # 3. 判定是原生币还是代币, 确定 kind + Token
     config = store.load_config()
     chain = args.chain or config.get("default_chain", "base")
-    token_info = None
+    token = None
     if args.token:
         token_info = store.resolve_token(config, chain, args.token)
         if not token_info:
             err(f"未知代币: {args.token}")
             return 1
+        token = chain_mod.Token(
+            address=token_info["address"],
+            decimals=token_info.get("decimals", 6),
+        )
         kind = "token"
     else:
         kind = "native"
@@ -277,20 +278,15 @@ def cmd_send(args: argparse.Namespace) -> int:
         return 1
 
     gas_mult = config.get("tx_defaults", {}).get("gas_multiplier", 1.1)
+    receipt_timeout = config.get("tx_defaults", {}).get("receipt_timeout", 30)
 
-    # 7. 签名 + 广播
+    # 7. 签名 + 广播 + 等待 receipt(地址校验、fee、构造都在 send 内部)
     try:
-        if kind == "native":
-            result = chain_mod.send_native(
-                w3, cc, acct, args.to, amount, gas_multiplier=gas_mult
-            )
-        else:
-            result = chain_mod.send_token(
-                w3, cc, acct,
-                token_info["address"],
-                token_info.get("decimals", 6),
-                args.to, amount, gas_multiplier=gas_mult,
-            )
+        receipt = chain_mod.send(
+            w3, cc, acct, args.to, amount,
+            token=token, gas_multiplier=gas_mult,
+            receipt_timeout=receipt_timeout,
+        )
     except Exception as e:
         err(f"交易失败: {e}")
         store.append_audit(
@@ -300,23 +296,52 @@ def cmd_send(args: argparse.Namespace) -> int:
         )
         return 1
 
-    # 8. 记账 + 审计
-    policy_mod.record_outcome(amount, kind=kind)
-    store.append_audit(
-        "send_ok",
-        from_addr=from_address, to=args.to, amount=amount,
-        symbol=result.symbol, kind=kind, tx_hash=result.tx_hash, reason=args.reason,
-    )
-
-    # 9. 输出
-    ok(f"\n✅ 交易已提交")
-    print(f"  tx hash: {result.tx_hash}")
-    print(f"  金额:    {result.amount_human} {result.symbol}")
-    print(f"  收款方:  {result.to}")
-    if result.explorer_url:
-        print(f"  浏览器:  {result.explorer_url}")
-    print(f"\n  提示: 交易上链可能需要数秒(L2)至数分钟(L1)。")
-    return 0
+    # 8. 据 receipt 状态记账 + 审计
+    symbol = token_info["address"][:10] + "…" if token else cc.get("native_symbol", "ETH")
+    if receipt.ok:
+        policy_mod.record_outcome(amount, kind=kind)
+        store.append_audit(
+            "send_ok",
+            from_addr=from_address, to=args.to, amount=amount,
+            symbol=symbol, kind=kind, tx_hash=receipt.tx_hash,
+            block=receipt.block_number, gas_used=receipt.gas_used, reason=args.reason,
+        )
+        ok(f"\n✅ 交易已上链")
+        print(f"  tx hash: {receipt.tx_hash}")
+        print(f"  区块:    {receipt.block_number}")
+        print(f"  gas:     {receipt.gas_used}")
+        print(f"  金额:    {amount} {kind}" + (f" ({args.token})" if args.token else ""))
+        print(f"  收款方:  {args.to}")
+        if receipt.explorer_url:
+            print(f"  浏览器:  {receipt.explorer_url}")
+        return 0
+    elif receipt.status == "pending":
+        store.append_audit(
+            "send_pending",
+            from_addr=from_address, to=args.to, amount=amount,
+            symbol=symbol, kind=kind, tx_hash=receipt.tx_hash, reason=args.reason,
+        )
+        ok(f"\n⏳ 交易已广播, 未在 {receipt_timeout}s 内确认")
+        print(f"  tx hash: {receipt.tx_hash}")
+        print(f"  收款方:  {args.to}")
+        if receipt.explorer_url:
+            print(f"  浏览器:  {receipt.explorer_url}")
+        print(f"\n  提示: 请稍后在浏览器查询确认状态。本次不计入日累计。")
+        return 0
+    else:  # failed — 链上回退
+        store.append_audit(
+            "send_reverted",
+            from_addr=from_address, to=args.to, amount=amount,
+            symbol=symbol, kind=kind, tx_hash=receipt.tx_hash,
+            block=receipt.block_number, gas_used=receipt.gas_used, reason=args.reason,
+        )
+        err(f"交易上链但执行回退(reverted)")
+        print(f"  tx hash: {receipt.tx_hash}")
+        print(f"  区块:    {receipt.block_number}")
+        if receipt.explorer_url:
+            print(f"  浏览器:  {receipt.explorer_url}")
+        print(f"\n  提示: 可能原因 — 余额不足、代币合约 revert、gas 不足。本次不计入日累计。")
+        return 1
 
 
 def cmd_policy(args: argparse.Namespace) -> int:
