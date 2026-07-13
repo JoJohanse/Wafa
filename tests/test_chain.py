@@ -21,6 +21,7 @@ from web3 import Web3
 from web3.providers.eth_tester import EthereumTesterProvider
 
 import chain as chain_mod
+import erc20
 
 # 静默 eth-tester/py-evm 的 DeprecationWarning 噪音
 warnings.filterwarnings("ignore", category=DeprecationWarning)
@@ -89,7 +90,7 @@ def funded_account(tester_w3):
 
 @pytest.fixture
 def mock_token(tester_w3, funded_account):
-    """部署一个 MockERC20 合约, 返回 (chain_mod.Token, abi, contract_address)。
+    """部署一个 MockERC20 合约, 返回 (erc20.Token, abi, contract_address)。
 
     部署者(funded_account)持有全部代币初始余额。
     """
@@ -113,7 +114,7 @@ def mock_token(tester_w3, funded_account):
     )
     assert receipt.status == 1, "MockERC20 部署失败"
     token_address = receipt.contractAddress
-    token = chain_mod.Token(address=token_address, decimals=6)
+    token = erc20.Token(address=token_address, decimals=6)
     return token, cd["abi"], token_address
 
 
@@ -237,7 +238,7 @@ class TestSendFailure:
             w3.eth.send_raw_transaction(signed.raw_transaction)
         )
         assert receipt.status == 1, "BadToken 部署失败"
-        token = chain_mod.Token(address=receipt.contractAddress, decimals=6)
+        token = erc20.Token(address=receipt.contractAddress, decimals=6)
 
         to = _recipient(tester_w3)
         # transfer 永远 revert → estimate_gas 模拟时抛 → send() 抛异常
@@ -276,7 +277,7 @@ class TestReceipt:
 
 class TestToken:
     def test_fields(self):
-        t = chain_mod.Token(address="0x" + "ab" * 20, decimals=6)
+        t = erc20.Token(address="0x" + "ab" * 20, decimals=6)
         assert t.address == "0x" + "ab" * 20
         assert t.decimals == 6
 
@@ -316,61 +317,3 @@ class TestNativeTxConstruction:
         """0.01 ETH 应正确换算为 10^16 wei"""
         value_wei = int(0.01 * 10 ** 18)
         assert value_wei == 10 ** 16
-
-
-class TestERC20Calldata:
-    def test_transfer_calldata_selector(self):
-        """ERC-20 transfer(address,uint256) 的 selector 应为 0xa9059cbb"""
-        w3 = Web3()
-        token = "0x" + "ab" * 20
-        to = "0x" + "11" * 20
-        contract = w3.eth.contract(
-            address=Web3.to_checksum_address(token), abi=chain_mod._ERC20_ABI
-        )
-        tx = contract.functions.transfer(
-            Web3.to_checksum_address(to), 5_000_000
-        ).build_transaction({
-            "from": Web3.to_checksum_address("0x" + "cd" * 20),
-            "nonce": 0, "gas": 60000, "chainId": 8453,
-            "maxFeePerGas": 10 ** 9, "maxPriorityFeePerGas": 10 ** 8,
-        })
-        data = tx["data"]
-        # selector 是前 4 字节(8 hex 字符)
-        assert data.startswith("0xa9059cbb")
-        # 完整 calldata: 0x + 8(selector) + 64(address) + 64(amount) = 138 字符
-        assert len(data) == 138
-        # to 字段应指向代币合约, 不是收款人
-        assert tx["to"].lower() == token.lower()
-
-    def test_transfer_calldata_signable(self):
-        """构造的 ERC-20 transfer tx 应可被签名"""
-        w3 = Web3()
-        acct = Account.create()
-        token = "0x" + "ab" * 20
-        to = "0x" + "11" * 20
-        contract = w3.eth.contract(
-            address=Web3.to_checksum_address(token), abi=chain_mod._ERC20_ABI
-        )
-        tx = contract.functions.transfer(
-            Web3.to_checksum_address(to), 100
-        ).build_transaction({
-            "from": acct.address,
-            "nonce": 0, "gas": 60000, "chainId": 8453,
-            "maxFeePerGas": 10 ** 9, "maxPriorityFeePerGas": 10 ** 8,
-        })
-        signed = w3.eth.account.sign_transaction(tx, acct.key)
-        assert len(signed.raw_transaction) > 0
-
-
-# ---------------------------------------------------------------------------
-# ABI 常量校验
-# ---------------------------------------------------------------------------
-
-class TestERC20ABI:
-    def test_abi_contains_required_functions(self):
-        """_ERC20_ABI 应含 balanceOf / decimals / symbol / transfer"""
-        names = {fn["name"] for fn in chain_mod._ERC20_ABI}
-        assert {"balanceOf", "decimals", "symbol", "transfer"}.issubset(names)
-
-    def test_abi_function_count(self):
-        assert len(chain_mod._ERC20_ABI) == 4

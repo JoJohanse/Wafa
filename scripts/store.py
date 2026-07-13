@@ -132,29 +132,6 @@ def get_chain_config(config: dict, chain: str | None = None) -> dict:
     return chains[chain]
 
 
-def resolve_token(config: dict, chain: str, token_ref: str) -> dict | None:
-    """
-    解析 --token 参数为 {address, decimals}。
-    token_ref 可以是: 别名(如 'usdc') 或 合约地址(0x...)。
-    返回 None 表示查不到。
-    """
-    if not token_ref:
-        return None
-    token_ref = token_ref.lower()
-    tokens = config.get("tokens", {}).get(chain, {})
-    # 先按别名
-    if token_ref in tokens:
-        return tokens[token_ref]
-    # 再按地址(大小写不敏感比较)
-    for info in tokens.values():
-        if isinstance(info, dict) and info.get("address", "").lower() == token_ref:
-            return info
-    # 看起来像地址就直接信任(假定 6 位精度需用户自填, 这里用 6 兜底)
-    if token_ref.startswith("0x") and len(token_ref) == 42:
-        return {"address": token_ref, "decimals": 6}
-    return None
-
-
 # ---------------------------------------------------------------------------
 # 通用 KV 状态(state.json) —— 原子读写
 #

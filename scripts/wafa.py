@@ -31,6 +31,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent))
 
 import chain as chain_mod
+import erc20
 import policy as policy_mod
 import store
 import wallet as wallet_mod
@@ -181,12 +182,16 @@ def cmd_balance(args: argparse.Namespace) -> int:
     print(f"  链:   {chain}")
 
     if args.token:
-        token_info = store.resolve_token(config, chain, args.token)
-        if not token_info:
+        try:
+            tok = erc20.resolve(w3, config, chain, args.token)
+        except ValueError as e:
+            err(str(e))
+            return 1
+        if not tok:
             err(f"未知代币: {args.token} (请在 config.yaml 的 tokens.{chain} 中配置)")
             return 1
         try:
-            bal = chain_mod.get_token_balance(w3, address, token_info["address"], cc)
+            bal = chain_mod.get_token_balance(w3, address, tok.address, cc)
         except ValueError as e:
             err(str(e))
             return 1
@@ -217,24 +222,31 @@ def cmd_send(args: argparse.Namespace) -> int:
         err(str(e))
         return 1
 
-    # 3. 判定是原生币还是代币, 确定 kind + Token
+    # 3. 连接链(resolve 陌生代币需要查链上 decimals, 所以 connect 在前)
     config = store.load_config()
     chain = args.chain or config.get("default_chain", "base")
+    try:
+        w3, cc = chain_mod.connect(chain)
+    except (ConnectionError, ValueError) as e:
+        err(str(e))
+        return 1
+
+    # 4. 判定是原生币还是代币, 确定 kind + Token
     token = None
     if args.token:
-        token_info = store.resolve_token(config, chain, args.token)
-        if not token_info:
-            err(f"未知代币: {args.token}")
+        try:
+            token = erc20.resolve(w3, config, chain, args.token)
+        except ValueError as e:
+            err(str(e))
             return 1
-        token = chain_mod.Token(
-            address=token_info["address"],
-            decimals=token_info.get("decimals", 6),
-        )
+        if not token:
+            err(f"未知代币: {args.token} (请在 config.yaml 的 tokens.{chain} 中配置)")
+            return 1
         kind = "token"
     else:
         kind = "native"
 
-    # 4. 策略检查(签名前拦截)
+    # 5. 策略检查(签名前拦截)
     decision = policy_mod.check(
         amount=amount,
         to_address=args.to,
@@ -253,7 +265,7 @@ def cmd_send(args: argparse.Namespace) -> int:
         err(f"策略拒绝: {decision.reason}")
         return 1
 
-    # 5. 解锁钱包(此时才需要密码)
+    # 6. 解锁钱包(此时才需要密码)
     print(f"\n  收款方: {args.to}")
     print(f"  金额:   {amount} {kind}" + (f" ({args.token})" if args.token else ""))
     if args.reason:
@@ -268,13 +280,6 @@ def cmd_send(args: argparse.Namespace) -> int:
     except Exception as e:
         err(f"解锁失败(密码错误?): {e}")
         store.append_audit("unlock_failed", address=from_address)
-        return 1
-
-    # 6. 连接链
-    try:
-        w3, cc = chain_mod.connect(chain)
-    except (ConnectionError, ValueError) as e:
-        err(str(e))
         return 1
 
     gas_mult = config.get("tx_defaults", {}).get("gas_multiplier", 1.1)
@@ -297,7 +302,7 @@ def cmd_send(args: argparse.Namespace) -> int:
         return 1
 
     # 8. 据 receipt 状态记账 + 审计
-    symbol = token_info["address"][:10] + "…" if token else cc.get("native_symbol", "ETH")
+    symbol = token.address[:10] + "…" if token else cc.get("native_symbol", "ETH")
     if receipt.ok:
         policy_mod.record_outcome(amount, kind=kind)
         store.append_audit(

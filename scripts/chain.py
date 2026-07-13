@@ -13,46 +13,8 @@ from typing import Any
 from web3 import Web3
 from web3.exceptions import ContractLogicError, TimeExhausted, TransactionNotFound
 
+from erc20 import ERC20_ABI, Token
 from store import get_chain_config, load_config
-
-# ERC-20 最小 ABI: 仅用到 balanceOf / decimals / transfer
-_ERC20_ABI = [
-    {
-        "constant": True,
-        "inputs": [{"name": "owner", "type": "address"}],
-        "name": "balanceOf",
-        "outputs": [{"name": "", "type": "uint256"}],
-        "stateMutability": "view",
-        "type": "function",
-    },
-    {
-        "constant": True,
-        "inputs": [],
-        "name": "decimals",
-        "outputs": [{"name": "", "type": "uint8"}],
-        "stateMutability": "view",
-        "type": "function",
-    },
-    {
-        "constant": True,
-        "inputs": [],
-        "name": "symbol",
-        "outputs": [{"name": "", "type": "string"}],
-        "stateMutability": "view",
-        "type": "function",
-    },
-    {
-        "constant": False,
-        "inputs": [
-            {"name": "to", "type": "address"},
-            {"name": "amount", "type": "uint256"},
-        ],
-        "name": "transfer",
-        "outputs": [{"name": "", "type": "bool"}],
-        "stateMutability": "nonpayable",
-        "type": "function",
-    },
-]
 
 
 # ---------------------------------------------------------------------------
@@ -109,7 +71,7 @@ def get_token_balance(w3: Web3, address: str, token_address: str, chain_config: 
     """查询 ERC-20 代币余额。"""
     checksum_token = Web3.to_checksum_address(token_address)
     checksum_owner = Web3.to_checksum_address(address)
-    contract = w3.eth.contract(address=checksum_token, abi=_ERC20_ABI)
+    contract = w3.eth.contract(address=checksum_token, abi=ERC20_ABI)
     try:
         raw = contract.functions.balanceOf(checksum_owner).call()
         decimals = contract.functions.decimals().call()
@@ -175,17 +137,6 @@ def estimate_fee(w3: Web3, from_addr: str, to: str, data: str = "0x", value: int
 # ---------------------------------------------------------------------------
 # 转账 —— 统一的 send() 接口
 # ---------------------------------------------------------------------------
-
-@dataclass
-class Token:
-    """ERC-20 代币的链上标识, 供 send() 使用。
-
-    address:  合约地址(checksum 或小写均可, send 内部转换)
-    decimals: 精度(用于 human amount → 最小单位换算)
-    """
-    address: str
-    decimals: int
-
 
 @dataclass
 class Receipt:
@@ -293,7 +244,7 @@ def _build_token_tx(
     """
     value = int(round(amount_human * (10 ** token.decimals)))
     token_ck = Web3.to_checksum_address(token.address)
-    contract = w3.eth.contract(address=token_ck, abi=_ERC20_ABI)
+    contract = w3.eth.contract(address=token_ck, abi=ERC20_ABI)
     tx = contract.functions.transfer(to_ck, value).build_transaction({"from": from_ck})
     # build_transaction 不保证填充 nonce —— 显式补上
     if "nonce" not in tx:

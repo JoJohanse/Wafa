@@ -24,10 +24,15 @@ Policy-checked before signing; signed and broadcast through the `chain` module's
 `send()` interface; audit-logged after the on-chain result is known.
 
 **Token** — a value object (`Token(address, decimals)`) identifying an ERC-20
-for a transfer. Passed to `chain.send(token=...)`. Resolution from a reference
-(alias or address) to a `Token` is a separate concern (candidate #3); today the
-CLI resolves via `store.resolve_token` and constructs the `Token` before calling
-`send()`.
+for a transfer. Passed to `chain.send(token=...)`. Lives in the `erc20` module.
+
+**erc20 module** — owns ERC-20 token resolution. `erc20.resolve(w3, config,
+chain, token_ref) -> Token | None` turns a `--token` reference (alias like
+`usdc`, or a contract address) into a `Token`. Resolution priority: config alias
+→ config address → on-chain `decimals()` call for unknown addresses. Unknown
+addresses that aren't valid ERC-20 contracts (no `decimals()`) raise `ValueError`
+— they do **not** silently fall back to `decimals: 6` (the old footgun, now
+fixed). The `ERC20_ABI` constant also lives here; `chain` imports it.
 
 **Receipt** — the on-chain result of a `send()`, returned by the `chain` module.
 A thin value object: `status` (`"success"` | `"pending"` | `"failed"`), `tx_hash`,
@@ -83,8 +88,7 @@ format; the content is supplied by callers.
 
 ## Not yet named / future
 
-- **Token resolution** — resolving a `--token` reference (alias or address) to a
-  `Token` value object. Currently lives in `store.resolve_token` (returns a dict;
-  hardcodes `decimals: 6` for unknown addresses — a known footgun). A dedicated
-  `token` module with on-chain `decimals()` resolution is candidate #3; the
-  `Token` dataclass already exists in `chain` and will move there.
+- **Package import** — modules are still flat scripts with `sys.path.insert`
+  hacks (candidate #4). A `wafa/` package with relative imports would let tests
+  `import wafa.erc20` without path gymnastics, and a `pyproject.toml` console
+  script entry point would replace `python scripts/wafa.py`.

@@ -83,30 +83,6 @@ class TestConfig:
         assert "chain_id" in cc
         assert cc["chain_id"] == cfg["chains"][default]["chain_id"]
 
-    def test_resolve_token_by_alias(self, tmp_wafa_home):
-        cfg = store.load_config()
-        info = store.resolve_token(cfg, "base", "usdc")
-        assert info is not None
-        assert info["address"].startswith("0x")
-
-    def test_resolve_token_by_address(self, tmp_wafa_home):
-        cfg = store.load_config()
-        # 用已配置的 USDC 地址反查
-        usdc = cfg["tokens"]["base"]["usdc"]["address"]
-        info = store.resolve_token(cfg, "base", usdc)
-        assert info is not None
-
-    def test_resolve_token_unknown(self, tmp_wafa_home):
-        cfg = store.load_config()
-        assert store.resolve_token(cfg, "base", "nonexistent") is None
-
-    def test_resolve_token_raw_address_assumed(self, tmp_wafa_home):
-        cfg = store.load_config()
-        # 陌生但合法的地址: 假定 6 位精度
-        info = store.resolve_token(cfg, "base", "0x" + "ab" * 20)
-        assert info is not None
-        assert info["decimals"] == 6
-
 
 # ---------------------------------------------------------------------------
 # 通用 KV 状态 —— store 只提供原子读写, 不感知计数语义
