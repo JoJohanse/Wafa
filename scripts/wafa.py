@@ -5,7 +5,7 @@ Wafa —— AI Agent 数字钱包 CLI
 用法:
     python wafa.py init
     python wafa.py create --label my-wallet
-    python wafa.py import 0xABC... --label imported
+    echo '0xABC...' | python wafa.py import --label imported   # 私钥走 stdin
     python wafa.py list
     python wafa.py balance                       # 查默认钱包
     python wafa.py balance --address 0x...
@@ -15,7 +15,8 @@ Wafa —— AI Agent 数字钱包 CLI
     python wafa.py policy show
     python wafa.py history --limit 20
 
-密码通过 stdin(getpass) 提示输入, 绝不作为命令行参数(防 ps 泄露)。
+密码与私钥均通过 stdin(getpass) 读取, 绝不作为命令行参数
+(防 shell 历史、ps 进程列表、系统日志泄露)。
 """
 
 from __future__ import annotations
@@ -86,7 +87,11 @@ def cmd_init(args: argparse.Namespace) -> int:
 def cmd_create(args: argparse.Namespace) -> int:
     section("创建新钱包")
     pw = ask_password("为钱包设置密码: ", confirm=True)
-    info = wallet_mod.create_wallet(password=pw, label=args.label)
+    try:
+        info = wallet_mod.create_wallet(password=pw, label=args.label)
+    except ValueError as e:
+        err(f"创建失败: {e}")
+        return 1
     ok(f"\n✅ 钱包已创建")
     print(f"  地址: {info.address}")
     if args.label:
@@ -99,18 +104,37 @@ def cmd_create(args: argparse.Namespace) -> int:
 
 def cmd_import(args: argparse.Namespace) -> int:
     section("导入私钥")
-    privkey = args.private_key.strip()
+    # 安全: 私钥从 stdin 读取(可用管道或交互输入), 绝不作为命令行参数。
+    # 命令行参数会进入 shell 历史、进程列表(ps)、系统日志, 风险极高。
+    print("  请通过 stdin 提供私钥(粘贴后回车), 或用管道:")
+    print("    echo '0xABC...' | python wafa.py import --label foo")
+    print("  (私钥不会回显; 用管道时请确认管道另一端可信)")
+    print()
+    try:
+        privkey_input = getpass.getpass("粘贴私钥(0x... 或裸hex, 输入不回显): ")
+    except (KeyboardInterrupt, EOFError):
+        err("已取消")
+        return 1
+    if not privkey_input:
+        err("未收到私钥")
+        return 1
+    privkey_buf = bytearray(privkey_input.encode("utf-8"))
+    # 立即清掉原始字符串引用(str 不可变, 只能解除引用)
+    del privkey_input
     pw = ask_password("为此钱包设置新密码: ", confirm=True)
     try:
-        info = wallet_mod.import_wallet(private_key=privkey, password=pw, label=args.label)
-    except Exception as e:
+        info = wallet_mod.import_wallet(private_key=bytes(privkey_buf), password=pw, label=args.label)
+    except ValueError as e:
         err(f"导入失败: {e}")
         return 1
+    finally:
+        # 无论成败, 清零本地缓冲
+        wallet_mod.secure_zero(privkey_buf)
     ok(f"\n✅ 钱包已导入")
     print(f"  地址: {info.address}")
     if args.label:
         print(f"  标签: {args.label}")
-    print(f"  ⚠️  私钥已加密存储, 原始私钥请从其他位置清除。")
+    print(f"  ⚠️  私钥已加密存储; 原始私钥请从剪贴板/历史中清除。")
     return 0
 
 
@@ -372,9 +396,8 @@ def build_parser() -> argparse.ArgumentParser:
     sp.add_argument("--label", help="钱包标签")
     sp.add_argument("--chain", help="目标链(仅作记录, 默认用 config 的 default_chain)")
 
-    # import
-    sp = sub.add_parser("import", help="导入已有私钥")
-    sp.add_argument("private_key", help="0x 开头的私钥")
+    # import (私钥从 stdin 读取, 不作为命令行参数, 防 shell 历史/ps 泄露)
+    sp = sub.add_parser("import", help="导入已有私钥(私钥从 stdin 读取)")
     sp.add_argument("--label", help="钱包标签")
 
     # list

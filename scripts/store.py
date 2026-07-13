@@ -24,17 +24,32 @@ _WAFA_DIR_ENV = "WAFA_HOME"
 _DEFAULT_DIR_NAME = ".wafa"
 
 
+def _chmod_700(p: Path) -> None:
+    """目录权限设为仅所有者可读写执行(700)。Windows 上语义有限, 但无害。"""
+    import stat as _stat
+    try:
+        p.chmod(_stat.S_IRWXU)
+    except OSError:
+        pass
+
+
 def wafa_home() -> Path:
-    """返回 Wafa 数据根目录(~/.wafa), 不存在则创建。"""
+    """返回 Wafa 数据根目录(~/.wafa), 不存在则创建。
+
+    目录权限设为 700(仅所有者可进入), 因为内含加密 keystore、
+    配置、状态与审计日志, 均为敏感财务数据。
+    """
     env = os.environ.get(_WAFA_DIR_ENV)
     home = Path(env) if env else Path.home() / _DEFAULT_DIR_NAME
     home.mkdir(parents=True, exist_ok=True)
+    _chmod_700(home)
     return home
 
 
 def keystores_dir() -> Path:
     d = wafa_home() / "keystores"
     d.mkdir(parents=True, exist_ok=True)
+    _chmod_700(d)
     return d
 
 
@@ -239,7 +254,11 @@ def count_tx_in_window(seconds: int) -> int:
 # ---------------------------------------------------------------------------
 
 def append_audit(action: str, **detail) -> None:
-    """追加一条审计记录。严禁在 detail 中放入私钥/密码。"""
+    """追加一条审计记录。严禁在 detail 中放入私钥/密码。
+
+    日志文件权限设为 600(仅所有者可读写), 因为日志含地址、金额、用途等
+    敏感财务行为, 不应被同机其他用户读取。
+    """
     p = audit_path()
     p.parent.mkdir(parents=True, exist_ok=True)
     entry = {
@@ -249,6 +268,17 @@ def append_audit(action: str, **detail) -> None:
     }
     with open(p, "a", encoding="utf-8") as f:
         f.write(json.dumps(entry, ensure_ascii=False) + "\n")
+    # 每次写入后收紧权限(首次创建时尤其重要)
+    _chmod_600(p)
+
+
+def _chmod_600(p) -> None:
+    """文件权限设为仅所有者可读写。Windows 上语义有限, 但无害。"""
+    import stat as _stat
+    try:
+        p.chmod(_stat.S_IRUSR | _stat.S_IWUSR)
+    except OSError:
+        pass
 
 
 def read_audit(limit: int = 20) -> list[dict]:
