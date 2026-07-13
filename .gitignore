@@ -1,4 +1,9 @@
-scripts/__pycache__/
+# Python 缓存
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# IDE / 工具
 .zcode/
 .vscode/
-tests/
