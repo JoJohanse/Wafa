@@ -64,19 +64,6 @@ class TestConfig:
         assert "chains" in cfg
         assert "default_chain" in cfg
 
-    def test_load_policy_exists(self, tmp_wafa_home):
-        pol = store.load_policy()
-        # init 复制的策略含 limits/safety 等键
-        assert "limits" in pol
-        assert "safety" in pol
-
-    def test_load_policy_missing_returns_relaxed(self, tmp_path, monkeypatch):
-        # 无 policy.yaml 时返回宽松兜底(不阻断)
-        monkeypatch.setenv("WAFA_HOME", str(tmp_path / "empty"))
-        pol = store.load_policy()
-        assert pol["kill_switch"] is False
-        assert pol["whitelist"]["enabled"] is False
-
     def test_get_chain_config_known(self, tmp_wafa_home):
         cfg = store.load_config()
         cc = store.get_chain_config(cfg, "base")
@@ -122,48 +109,23 @@ class TestConfig:
 
 
 # ---------------------------------------------------------------------------
-# 状态追踪
+# 通用 KV 状态 —— store 只提供原子读写, 不感知计数语义
+# (日累计/速率窗口的测试见 test_policy.py::TestPolicyState)
 # ---------------------------------------------------------------------------
 
-class TestState:
+class TestStateKV:
     def test_load_state_empty(self, tmp_wafa_home):
         store.save_state({})
         assert store.load_state() == {}
 
-    def test_record_spend_accumulates(self, fresh_state):
-        store.record_spend(0.1, "native")
-        store.record_spend(0.2, "native")
-        assert store.get_daily_spent("native") == pytest.approx(0.3)
+    def test_save_load_roundtrip(self, tmp_wafa_home):
+        store.save_state({"daily": {"x": 1}, "tx_timestamps": [1.0, 2.0]})
+        assert store.load_state() == {"daily": {"x": 1}, "tx_timestamps": [1.0, 2.0]}
 
-    def test_record_spend_separate_kinds(self, fresh_state):
-        store.record_spend(1.0, "native")
-        store.record_spend(5.0, "token")
-        assert store.get_daily_spent("native") == pytest.approx(1.0)
-        assert store.get_daily_spent("token") == pytest.approx(5.0)
-
-    def test_record_spend_rounding(self, fresh_state):
-        # 浮点累计应保留 8 位小数精度
-        store.record_spend(0.33333333, "native")
-        assert store.get_daily_spent("native") == pytest.approx(0.33333333, abs=1e-8)
-
-    def test_record_tx_timestamp_appended(self, fresh_state):
-        store.record_tx_timestamp()
-        store.record_tx_timestamp()
-        state = store.load_state()
-        assert len(state["tx_timestamps"]) == 2
-
-    def test_count_tx_in_window(self, fresh_state):
-        for _ in range(3):
-            store.record_tx_timestamp()
-        assert store.count_tx_in_window(60) == 3
-
-    def test_count_tx_in_window_excludes_old(self, fresh_state):
-        # 手动注入一个 2 小时前的旧时间戳
-        import time
-        state = {"tx_timestamps": [time.time() - 7200, time.time(), time.time()]}
-        store.save_state(state)
-        # 最近 60 秒内只有 2 笔
-        assert store.count_tx_in_window(60) == 2
+    def test_load_state_missing_file(self, tmp_path, monkeypatch):
+        # 无 state.json 时返回空 dict, 不崩溃
+        monkeypatch.setenv("WAFA_HOME", str(tmp_path / "empty"))
+        assert store.load_state() == {}
 
 
 # ---------------------------------------------------------------------------

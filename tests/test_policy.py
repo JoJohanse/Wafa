@@ -54,16 +54,16 @@ class TestDailyLimit:
         assert "日累计" in d.reason
 
     def test_daily_accumulates(self, strict_policy):
-        store.save_state({})
-        # 花两次 0.2, 第三次 0.2 应触发(0.4+0.2=0.6 > 0.5, 但单笔 0.2<=0.05? 不, 0.2>0.05 单笔先拦)
-        # 用更小金额: 单笔上限 0.05, 日累计 0.5
-        for _ in range(9):
-            store.record_spend(0.05, "native")  # 累计 0.45
-        # 再花 0.05: 累计 0.50 = 上限, 通过
+        # 直接注入日累计状态(绕过 record_outcome, 后者会同时记速率时间戳
+        # 触发 max_tx_per_minute; 这里只测日累计的累积与上限判断)
+        import datetime
+        today = datetime.date.today().isoformat()
+        store.save_state({"daily": {today: {"native": 0.45, "token": 0.0}}})
+        # 累计 0.45, 再花 0.05: 合计 0.50 = 上限, 通过
         d1 = policy.check(0.05, WHITELIST_ADDR, "r", "native")
         assert d1.allowed
-        # 记录后, 再花 0.01: 累计 0.51 > 0.5, 拒
-        store.record_spend(0.05, "native")
+        # 记录后累计 0.50, 再花 0.01: 合计 0.51 > 0.5, 拒
+        policy.record_outcome(0.05, "native")
         d2 = policy.check(0.01, WHITELIST_ADDR, "r", "native")
         assert not d2.allowed
 
@@ -72,7 +72,7 @@ class TestRateLimit:
     def test_minute_rate_exceeded(self, strict_policy):
         store.save_state({})
         for _ in range(5):
-            store.record_tx_timestamp()
+            policy.record_outcome(0.01, "native")
         # 第 6 笔应被速率限制拦截
         d = policy.check(0.01, WHITELIST_ADDR, "r", "native")
         assert not d.allowed
@@ -151,3 +151,68 @@ class TestDecisionObject:
     def test_decision_bool_false(self, strict_policy):
         d = policy.check(50, WHITELIST_ADDR, "r", "native")  # 超单笔
         assert bool(d) is False
+
+
+# ---------------------------------------------------------------------------
+# 策略配置读取 —— load_policy 从 store 迁入 policy
+# ---------------------------------------------------------------------------
+
+class TestLoadPolicy:
+    def test_load_policy_exists(self, tmp_wafa_home):
+        pol = policy.load_policy()
+        # init 复制的策略含 limits/safety 等键
+        assert "limits" in pol
+        assert "safety" in pol
+
+    def test_load_policy_missing_returns_relaxed(self, tmp_path, monkeypatch):
+        # 无 policy.yaml 时返回宽松兜底(不阻断)
+        monkeypatch.setenv("WAFA_HOME", str(tmp_path / "empty"))
+        pol = policy.load_policy()
+        assert pol["kill_switch"] is False
+        assert pol["whitelist"]["enabled"] is False
+
+
+# ---------------------------------------------------------------------------
+# 计数状态 —— policy 拥有日累计与速率窗口, 通过 store 的 KV 持久化
+# 测试通过 policy 的公开接口(record_outcome / get_daily_spent /
+# count_tx_in_window)验证, 不直接操作内部结构。
+# ---------------------------------------------------------------------------
+
+class TestPolicyState:
+    def test_record_outcome_accumulates(self, fresh_state):
+        policy.record_outcome(0.1, "native")
+        policy.record_outcome(0.2, "native")
+        assert policy.get_daily_spent("native") == pytest.approx(0.3)
+
+    def test_record_outcome_separate_kinds(self, fresh_state):
+        policy.record_outcome(1.0, "native")
+        policy.record_outcome(5.0, "token")
+        assert policy.get_daily_spent("native") == pytest.approx(1.0)
+        assert policy.get_daily_spent("token") == pytest.approx(5.0)
+
+    def test_record_outcome_rounding(self, fresh_state):
+        # 浮点累计应保留 8 位小数精度
+        policy.record_outcome(0.33333333, "native")
+        assert policy.get_daily_spent("native") == pytest.approx(0.33333333, abs=1e-8)
+
+    def test_record_outcome_appends_timestamp(self, fresh_state):
+        policy.record_outcome(0.01, "native")
+        policy.record_outcome(0.01, "native")
+        # 两次成功发送 → 两个时间戳, 落在最近 60 秒窗口内
+        assert policy.count_tx_in_window(60) == 2
+
+    def test_count_tx_in_window(self, fresh_state):
+        for _ in range(3):
+            policy.record_outcome(0.01, "native")
+        assert policy.count_tx_in_window(60) == 3
+
+    def test_count_tx_in_window_excludes_old(self, fresh_state):
+        # 直接注入一个 2 小时前的旧时间戳(record_outcome 只记 time.time(),
+        # 无法造旧数据; 这里测的是读取过滤, 用 store 的 KV 构造 precondition)
+        import time
+        store.save_state({
+            "tx_timestamps": [time.time() - 7200, time.time(), time.time()]
+        })
+        # 最近 60 秒内只有 2 笔
+        assert policy.count_tx_in_window(60) == 2
+

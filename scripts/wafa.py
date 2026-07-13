@@ -301,8 +301,7 @@ def cmd_send(args: argparse.Namespace) -> int:
         return 1
 
     # 8. 记账 + 审计
-    store.record_spend(amount, kind=kind)
-    store.record_tx_timestamp()
+    policy_mod.record_outcome(amount, kind=kind)
     store.append_audit(
         "send_ok",
         from_addr=from_address, to=args.to, amount=amount,
@@ -322,7 +321,7 @@ def cmd_send(args: argparse.Namespace) -> int:
 
 def cmd_policy(args: argparse.Namespace) -> int:
     section("当前策略")
-    policy = store.load_policy()
+    policy = policy_mod.load_policy()
 
     if policy.get("kill_switch"):
         print("  🚨 kill_switch: 已开启(所有转账被拒绝)")
@@ -354,8 +353,8 @@ def cmd_policy(args: argparse.Namespace) -> int:
 
     # 今日累计
     print("\n  今日累计花费:")
-    print(f"    原生币: {store.get_daily_spent('native')}")
-    print(f"    代币:   {store.get_daily_spent('token')}")
+    print(f"    原生币: {policy_mod.get_daily_spent('native')}")
+    print(f"    代币:   {policy_mod.get_daily_spent('token')}")
     return 0
 
 

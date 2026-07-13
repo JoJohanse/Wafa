@@ -10,7 +10,6 @@ from __future__ import annotations
 import json
 import os
 import time
-from datetime import date
 from pathlib import Path
 
 import yaml
@@ -121,27 +120,6 @@ def load_config() -> dict:
     return merged
 
 
-def load_policy() -> dict:
-    """加载 policy.yaml; 若不存在返回宽松默认(不阻断基本使用)。"""
-    p = policy_path()
-    if not p.exists():
-        return _relaxed_policy()
-    with open(p, "r", encoding="utf-8") as f:
-        data = yaml.safe_load(f) or {}
-    return data
-
-
-def _relaxed_policy() -> dict:
-    """无策略文件时的宽松兜底: 仅保留 require_reason, 其余不限制。"""
-    return {
-        "limits": {},
-        "rate_limit": {},
-        "whitelist": {"enabled": False, "addresses": []},
-        "safety": {"require_reason": False, "allowed_purposes": []},
-        "kill_switch": False,
-    }
-
-
 def get_chain_config(config: dict, chain: str | None = None) -> dict:
     """返回指定链的配置; chain 为 None 时用 default_chain。"""
     chain = chain or config.get("default_chain", "base")
@@ -178,13 +156,11 @@ def resolve_token(config: dict, chain: str, token_ref: str) -> dict | None:
 
 
 # ---------------------------------------------------------------------------
-# 状态追踪(state.json) —— 当日累计、速率窗口
+# 通用 KV 状态(state.json) —— 原子读写
+#
+# store 只提供 state.json 的文件 I/O, 不感知其内部结构。
+# 计数语义(日累计、速率窗口)归 policy 模块所有, 通过本接口持久化。
 # ---------------------------------------------------------------------------
-
-def _today_key() -> str:
-    """当日日期键, 用于日累计滚动重置。"""
-    return date.today().isoformat()
-
 
 def load_state() -> dict:
     p = state_path()
@@ -204,49 +180,6 @@ def save_state(state: dict) -> None:
     with open(tmp, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2, ensure_ascii=False)
     os.replace(tmp, p)  # 原子替换
-
-
-def get_daily_spent(kind: str = "native", state: dict | None = None) -> float:
-    """读取当日累计花费。kind: 'native' | 'token'。
-
-    state 为 None 时自动从 state.json 读取(供 policy.check 调用);
-    传入 state 时直接查(避免重复读盘)。
-    """
-    if state is None:
-        state = load_state()
-    today = _today_key()
-    return state.get("daily", {}).get(today, {}).get(kind, 0.0)
-
-
-def record_spend(amount: float, kind: str = "native") -> dict:
-    """累加当日花费并落盘, 返回更新后的 state。"""
-    state = load_state()
-    today = _today_key()
-    daily = state.setdefault("daily", {})
-    today_entry = daily.setdefault(today, {"native": 0.0, "token": 0.0})
-    today_entry[kind] = round(today_entry.get(kind, 0.0) + amount, 8)
-    save_state(state)
-    return state
-
-
-def record_tx_timestamp() -> dict:
-    """记录一次转账的时间戳(用于速率限制), 返回更新后的 state。"""
-    state = load_state()
-    txs = state.setdefault("tx_timestamps", [])
-    txs.append(time.time())
-    # 只保留最近 1 小时(足够覆盖分钟/小时窗口)
-    cutoff = time.time() - 3600
-    state["tx_timestamps"] = [t for t in txs if t >= cutoff]
-    save_state(state)
-    return state
-
-
-def count_tx_in_window(seconds: int) -> int:
-    """统计最近 N 秒内的转账次数。"""
-    state = load_state()
-    txs = state.get("tx_timestamps", [])
-    cutoff = time.time() - seconds
-    return sum(1 for t in txs if t >= cutoff)
 
 
 # ---------------------------------------------------------------------------
