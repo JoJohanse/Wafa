@@ -1,4 +1,12 @@
-scripts/__pycache__/
+# Python 缓存
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# IDE / 工具
 .zcode/
 .vscode/
-tests/
+
+# 测试临时产物(tests/ 源码本身要提交, 只忽略缓存)
+tests/__pycache__/
