@@ -216,6 +216,147 @@ class TestUnlock:
 
 
 # ---------------------------------------------------------------------------
+# 解锁失败节流 —— 安全核心: 防止被入侵的 agent 反复试密码
+# ---------------------------------------------------------------------------
+
+class TestUnlockThrottle:
+    """解锁失败计数与锁定行为。默认阈值 5 次, 锁定 300 秒。"""
+
+    def _force_failures(self, address: str, n: int):
+        """触发 n 次错误解锁, 吞掉非锁定异常, 在触发锁定时停止。"""
+        for _ in range(n):
+            try:
+                wallet.unlock(address, "WrongP@ss1!")
+            except wallet.UnlockLocked:
+                break
+            except (ValueError, KeyError):
+                continue  # 密码错误, 计数累积, 继续下一次
+
+    def test_few_failures_no_lock(self, tmp_wafa_home):
+        """阈值以下失败不锁定, 仍可正常解锁"""
+        info = wallet.create_wallet(STRONG_PW, "t")
+        self._force_failures(info.address, 4)  # 阈值 5, 试 4 次
+        # 第 5 次用正确密码应能解锁(未达锁定)
+        acct = wallet.unlock(info.address, STRONG_PW)
+        assert acct.address == info.address
+
+    def test_lock_after_threshold(self, tmp_wafa_home):
+        """达到阈值后锁定, 即便用正确密码也被拒"""
+        info = wallet.create_wallet(STRONG_PW, "t")
+        self._force_failures(info.address, 5)
+        # 锁定期内正确密码仍被拒
+        with pytest.raises(wallet.UnlockLocked):
+            wallet.unlock(info.address, STRONG_PW)
+
+    def test_lock_blocks_even_correct_password(self, tmp_wafa_home):
+        info = wallet.create_wallet(STRONG_PW, "t")
+        self._force_failures(info.address, 5)
+        with pytest.raises(wallet.UnlockLocked):
+            wallet.unlock(info.address, STRONG_PW)
+
+    def test_success_clears_counter(self, tmp_wafa_home):
+        """成功解锁清零失败计数, 之后可重新有 5 次机会"""
+        info = wallet.create_wallet(STRONG_PW, "t")
+        self._force_failures(info.address, 3)
+        # 用正确密码解锁 → 计数清零
+        wallet.unlock(info.address, STRONG_PW)
+        import store
+        assert store.get_unlock_state(info.address) == {}
+
+    def test_lock_expires_allows_retry(self, tmp_wafa_home):
+        """锁定期满后可再次尝试(手动把 locked_until 调到过去)"""
+        info = wallet.create_wallet(STRONG_PW, "t")
+        self._force_failures(info.address, 5)
+        import time as _t
+        import store
+        # 手动把锁定时间提前到过去, 模拟锁定过期
+        st = store.load_state()
+        st["unlock_failures"][info.address.lower()]["locked_until"] = _t.time() - 1
+        store.save_state(st)
+        # 过期后正确密码应能解锁并清零
+        acct = wallet.unlock(info.address, STRONG_PW)
+        assert acct.address == info.address
+
+    def test_locked_does_not_run_scrypt(self, tmp_wafa_home):
+        """锁定期内不跑 scrypt(返回快, CPU 不消耗)"""
+        info = wallet.create_wallet(STRONG_PW, "t")
+        self._force_failures(info.address, 5)
+        # 第二次调用应立即抛 UnlockLocked, 不跑 decrypt
+        import time as _t
+        start = _t.time()
+        with pytest.raises(wallet.UnlockLocked):
+            wallet.unlock(info.address, STRONG_PW)
+        # scrypt N=2^18 至少数十毫秒; 锁定拒绝应在 0.5s 内
+        assert _t.time() - start < 0.5
+
+    def test_failure_count_persists_across_unlocks(self, tmp_wafa_home):
+        """失败计数在 state.json 中持久化, 不因进程退出而丢失"""
+        info = wallet.create_wallet(STRONG_PW, "t")
+        self._force_failures(info.address, 1)
+        # 重新 load_state 看 unlock_failures 已记录
+        import store
+        st = store.load_state()
+        assert info.address.lower() in st.get("unlock_failures", {})
+        assert st["unlock_failures"][info.address.lower()]["count"] == 1
+
+    def test_throttle_respects_policy_config(self, tmp_wafa_home):
+        """policy.yaml 的 unlock_throttle 可调低阈值"""
+        import yaml
+        import policy as policy_mod
+        import store
+        pol = policy_mod.load_policy()
+        pol["unlock_throttle"] = {"max_attempts": 3, "lockout_seconds": 60}
+        with open(store.policy_path(), "w", encoding="utf-8") as f:
+            yaml.dump(pol, f)
+        info = wallet.create_wallet(STRONG_PW, "t")
+        # 试 3 次错误 → 锁(阈值被调成 3)
+        for _ in range(3):
+            try:
+                wallet.unlock(info.address, "WrongP@ss1!")
+            except wallet.UnlockLocked:
+                break
+            except (ValueError, KeyError):
+                continue
+        with pytest.raises(wallet.UnlockLocked):
+            wallet.unlock(info.address, STRONG_PW)
+
+    def test_corrupted_keystore_not_counted_as_failure(self, tmp_wafa_home, capsys):
+        """keystore 文件损坏(JSONDecodeError)不应被当作'试密失败'计入节流。
+
+        回归守护: except 收窄后, 只有真正的密码错(ValueError/KeyError)才计数;
+        文件坏了应原样抛出, 不会把用户锁死。
+        """
+        info = wallet.create_wallet(STRONG_PW, "t")
+        # 把 keystore 文件搞坏
+        info.keystore_file.write_text("{ not valid json ")
+        # 解锁应抛 JSONDecodeError(或类似), 而不是被计入失败
+        with pytest.raises(json.JSONDecodeError):
+            wallet.unlock(info.address, STRONG_PW)
+        # 关键: 失败计数应为 0(没被当作试密)
+        import store
+        assert store.get_unlock_state(info.address) == {}
+
+    def test_throttle_config_warns_on_bad_yaml(self, tmp_wafa_home, capsys):
+        """policy.yaml 的 unlock_throttle 格式坏时, 退默认且打 stderr 告警(不静默)。"""
+        import policy as policy_mod
+        import store
+        # 写一份 unlock_throttle 值非法的 policy.yaml
+        bad = policy_mod.load_policy()
+        bad["unlock_throttle"] = {"max_attempts": "not_a_number", "lockout_seconds": 60}
+        with open(store.policy_path(), "w", encoding="utf-8") as f:
+            import yaml
+            yaml.dump(bad, f)
+        # 读 throttle config
+        max_a, lock_s = wallet._load_throttle_config()
+        # 应退回默认
+        assert max_a == wallet._DEFAULT_MAX_ATTEMPTS
+        assert lock_s == wallet._DEFAULT_LOCKOUT_SECONDS
+        # 且 stderr 有告警(不静默)
+        captured = capsys.readouterr()
+        assert "警告" in captured.err or "warning" in captured.err.lower()
+
+
+# ---------------------------------------------------------------------------
 # list / label
 # ---------------------------------------------------------------------------
 
