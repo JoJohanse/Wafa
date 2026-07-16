@@ -15,12 +15,22 @@ from __future__ import annotations
 import json
 import os
 import stat
+import sys
 from dataclasses import dataclass
 from pathlib import Path
 
+import yaml
+from yaml import YAMLError
+
 from eth_account import Account
 
-from store import append_audit, keystores_dir
+from store import (
+    append_audit,
+    clear_unlock_failure,
+    is_unlock_locked,
+    keystores_dir,
+    record_unlock_failure,
+)
 
 Account.enable_unaudited_hdwallet_features()
 
@@ -243,27 +253,83 @@ def import_wallet(private_key: "str | bytes | bytearray", password: str, label: 
         secure_zero(key_bytes)
 
 
+class UnlockLocked(Exception):
+    """钱包因连续解锁失败过多被暂时锁定。"""
+
+
+# 解锁节流默认参数(可被 policy.yaml 的 unlock_throttle 覆盖)
+_DEFAULT_MAX_ATTEMPTS = 5
+_DEFAULT_LOCKOUT_SECONDS = 300
+
+
+def _load_throttle_config() -> tuple[int, int]:
+    """从 policy.yaml 读取 unlock_throttle 参数, 缺失或格式错误则用默认。
+
+    注意: 这里故意收窄异常类型, 只捕获"配置读不出/格式坏"这类预期错误,
+    不吞 KeyboardInterrupt 等; 同时打 stderr 告警, 避免静默退回默认导致
+    用户以为"调成了 3 次"实际还在用 5 次。
+    """
+    try:
+        from policy import load_policy
+        pol = load_policy() or {}
+        t = pol.get("unlock_throttle", {}) or {}
+        return int(t.get("max_attempts", _DEFAULT_MAX_ATTEMPTS)), int(t.get("lockout_seconds", _DEFAULT_LOCKOUT_SECONDS))
+    except (OSError, YAMLError, TypeError, ValueError) as e:
+        # 配置读不到/格式坏: 退默认, 但要告警, 不能静默
+        print(f"[wafa] 警告: 读取 unlock_throttle 失败({type(e).__name__}: {e}), 退回默认值"
+              f"(max_attempts={_DEFAULT_MAX_ATTEMPTS}, lockout={_DEFAULT_LOCKOUT_SECONDS}s)",
+              file=sys.stderr)
+        return _DEFAULT_MAX_ATTEMPTS, _DEFAULT_LOCKOUT_SECONDS
+
+
 def unlock(address: str, password: str) -> Account:
     """
     用密码解锁钱包, 返回内存中的 Account 对象。
 
     调用方应在使用后尽快丢弃返回值, 不要缓存或序列化。
-    密码错误时抛出 eth_account 的异常(KeyError / ValueError)。
+    密码错误时抛出 eth_account 的异常(KeyError / ValueError);
+    连续失败过多时抛出 UnlockLocked(锁定期内不再跑 scrypt)。
     """
+    # 节流: 锁定期内直接拒绝, 不跑 scrypt(不消耗 CPU, 不给试密机会)
+    locked, remaining = is_unlock_locked(address)
+    if locked:
+        append_audit("unlock_locked", address=address, remaining_seconds=round(remaining, 1))
+        raise UnlockLocked(
+            f"钱包 {address[:10]}... 因连续失败被锁定, 还剩 {int(remaining)} 秒"
+        )
+
     info = WalletInfo(address=address)
     if not info.keystore_file.exists():
         raise FileNotFoundError(f"找不到 {address} 的 keystore 文件: {info.keystore_file}")
     keystore = _read_keystore(info.keystore_file)
-    # decrypt 返回 bytes 私钥(不可变); 立即拷贝到 bytearray 以便清零
-    privkey_bytes = Account.decrypt(keystore, password)
-    privkey_mut = bytearray(privkey_bytes)
-    # 原始 bytes 立即解除引用, 缩短明文残留窗口
-    del privkey_bytes
+
+    max_attempts, lockout_seconds = _load_throttle_config()
     try:
-        acct = Account.from_key(bytes(privkey_mut))
-        return acct
-    finally:
-        secure_zero(privkey_mut)
+        # decrypt 返回 bytes 私钥(不可变); 立即拷贝到 bytearray 以便清零
+        privkey_bytes = Account.decrypt(keystore, password)
+    except (ValueError, KeyError):
+        # 密码错误(MAC mismatch 等): 记账, 可能触发锁定。
+        # 故意只捕这两类 —— decrypt 密码错的真实类型; 其余异常(如 keystore
+        # 文件损坏的 JSONDecodeError)不应被当作"试密失败"计入节流, 否则
+        # 文件坏了也会把用户锁死。
+        count, locked_until = record_unlock_failure(address, max_attempts, lockout_seconds)
+        append_audit("unlock_failed", address=address, fail_count=count)
+        if count >= max_attempts:
+            raise UnlockLocked(
+                f"连续失败 {count} 次, 钱包已锁定 {lockout_seconds} 秒"
+            ) from None
+        raise
+    else:
+        # 成功: 清零失败计数
+        clear_unlock_failure(address)
+        privkey_mut = bytearray(privkey_bytes)
+        # 原始 bytes 立即解除引用, 缩短明文残留窗口
+        del privkey_bytes
+        try:
+            acct = Account.from_key(bytes(privkey_mut))
+            return acct
+        finally:
+            secure_zero(privkey_mut)
 
 
 def list_wallets() -> list[WalletInfo]:

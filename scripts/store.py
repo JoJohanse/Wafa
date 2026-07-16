@@ -160,6 +160,58 @@ def save_state(state: dict) -> None:
 
 
 # ---------------------------------------------------------------------------
+# 解锁失败节流 —— 防止被入侵的 agent 反复试密码
+# 每个钱包地址独立计数: count = 连续失败次数, locked_until = 锁定到期时间戳
+# ---------------------------------------------------------------------------
+
+def get_unlock_state(address: str) -> dict:
+    """返回某地址的解锁失败状态 {count, locked_until}, 无记录则返回空 dict。"""
+    state = load_state()
+    return state.get("unlock_failures", {}).get(address.lower(), {})
+
+
+def record_unlock_failure(address: str, max_attempts: int, lockout_seconds: int) -> tuple[int, float]:
+    """
+    记录一次解锁失败, 返回 (当前失败计数, 锁定到期时间戳; 0.0 表示未锁定)。
+    达到 max_attempts 时开始锁定 lockout_seconds 秒。
+    """
+    addr = address.lower()
+    state = load_state()
+    failures = state.setdefault("unlock_failures", {})
+    entry = failures.get(addr, {"count": 0, "locked_until": 0.0})
+    entry["count"] = entry.get("count", 0) + 1
+    if entry["count"] >= max_attempts:
+        entry["locked_until"] = time.time() + lockout_seconds
+    else:
+        entry["locked_until"] = 0.0
+    failures[addr] = entry
+    save_state(state)
+    return entry["count"], entry["locked_until"]
+
+
+def clear_unlock_failure(address: str) -> None:
+    """成功解锁后清零该地址的失败计数(地址归一为小写)。"""
+    addr = address.lower()
+    state = load_state()
+    failures = state.get("unlock_failures", {})
+    if addr in failures:
+        del failures[addr]
+        save_state(state)
+
+
+def is_unlock_locked(address: str) -> tuple[bool, float]:
+    """
+    返回 (是否处于锁定期, 锁定剩余秒数)。
+    锁定期满则视为未锁定。不主动清理过期状态, 下次失败/成功会自然更新。
+    """
+    addr = address.lower()
+    entry = get_unlock_state(addr)
+    locked_until = entry.get("locked_until", 0.0)
+    remaining = locked_until - time.time()
+    return (remaining > 0), max(0.0, remaining)
+
+
+# ---------------------------------------------------------------------------
 # 审计日志(audit.log) —— JSON Lines, 每行一笔
 # ---------------------------------------------------------------------------
 
