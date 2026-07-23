@@ -139,6 +139,90 @@ class TestAudit:
         assert records[0]["action"] == "good"
 
 
+class TestAuditHashChain:
+    """审计日志哈希链: 防就地篡改/删除/插入。"""
+
+    def test_chain_intact_after_normal_appends(self, tmp_wafa_home):
+        """连续正常写入, 链应完整"""
+        for i in range(5):
+            store.append_audit("act", i=i)
+        ok, bad_idx, reason = store.verify_audit_chain()
+        assert ok, f"应完整, 但报: {reason}"
+        assert bad_idx is None
+
+    def test_first_record_prev_hash_is_genesis(self, tmp_wafa_home):
+        """首条记录的 prev_hash 必须是 'genesis' 占位"""
+        store.append_audit("first")
+        records = store.read_audit(10)
+        assert records[0]["prev_hash"] == "genesis"
+
+    def test_records_linked_by_hash(self, tmp_wafa_home):
+        """第 N 条的 prev_hash == 第 N-1 条的 hash"""
+        store.append_audit("a")
+        store.append_audit("b")
+        store.append_audit("c")
+        records = store.read_audit(10)
+        assert records[1]["prev_hash"] == records[0]["hash"]
+        assert records[2]["prev_hash"] == records[1]["hash"]
+
+    def test_detect_tampered_content(self, tmp_wafa_home):
+        """改某行内容(不改 hash) → 该行 hash 与内容不符, 报篡改"""
+        store.append_audit("a", amount=1)
+        store.append_audit("b", amount=2)
+        # 篡改第一行: 把 amount 改掉, 但保留旧 hash
+        p = store.audit_path()
+        lines = p.read_text(encoding="utf-8").splitlines()
+        rec = json.loads(lines[0])
+        rec["amount"] = 999  # 篡改
+        lines[0] = json.dumps(rec, ensure_ascii=False)
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        ok, bad_idx, reason = store.verify_audit_chain()
+        assert not ok
+        assert bad_idx == 0
+        assert "篡改" in reason
+
+    def test_detect_deleted_middle_record(self, tmp_wafa_home):
+        """删中间一行 → 第 N 行 prev_hash 断链"""
+        for i in range(4):
+            store.append_audit("act", i=i)
+        p = store.audit_path()
+        lines = p.read_text(encoding="utf-8").splitlines()
+        # 删第 1 行(index 1), 留下 0,2,3
+        del lines[1]
+        p.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        ok, bad_idx, reason = store.verify_audit_chain()
+        assert not ok
+        assert bad_idx is not None
+        assert "断链" in reason
+
+    def test_detect_inserted_record(self, tmp_wafa_home):
+        """插入一行伪造记录 → 断链"""
+        store.append_audit("real")
+        p = store.audit_path()
+        # 在最前插入一条伪造记录(prev_hash 对不上 genesis 之外的任何东西)
+        fake = json.dumps({"ts": "fake", "action": "evil", "prev_hash": "genesis", "hash": "deadbeef"}, ensure_ascii=False)
+        original = p.read_text(encoding="utf-8")
+        p.write_text(fake + "\n" + original, encoding="utf-8")
+        ok, bad_idx, reason = store.verify_audit_chain()
+        assert not ok
+        # 伪造行 hash 与内容不符(或后续 real 行 prev_hash 断链)
+        assert bad_idx is not None
+
+    def test_empty_log_is_intact(self, tmp_wafa_home):
+        """空日志视为完整"""
+        ok, bad_idx, _ = store.verify_audit_chain()
+        assert ok
+
+    def test_hash_deterministic(self, tmp_wafa_home):
+        """相同内容应产生相同 hash(跨进程稳定)"""
+        store.append_audit("same", x=1)
+        records = store.read_audit(1)
+        h1 = records[0]["hash"]
+        # 重算
+        recomputed = store._entry_hash({k: v for k, v in records[0].items()})
+        assert h1 == recomputed
+
+
 # ---------------------------------------------------------------------------
 # 初始化
 # ---------------------------------------------------------------------------
